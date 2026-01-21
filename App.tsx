@@ -53,7 +53,6 @@ const App: React.FC = () => {
   const [leaderboard, setLeaderboard] = useState<ScoreRecord[]>([]);
   
   const boardRef = useRef<HTMLDivElement>(null);
-  const timerRef = useRef<number | null>(null);
   const requestRef = useRef<number | null>(null);
 
   // Load Leaderboard
@@ -64,15 +63,17 @@ const App: React.FC = () => {
     }
   }, []);
 
-  const saveScore = useCallback((finalScore: number) => {
+  const saveScore = useCallback((finalScore: number, mode: GameMode) => {
     if (finalScore <= 0) return;
-    const newRecord: ScoreRecord = { score: finalScore, date: Date.now(), mode: selectedMode };
-    const updated = [...leaderboard, newRecord]
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 10);
-    setLeaderboard(updated);
-    localStorage.setItem('emoji_blast_leaderboard', JSON.stringify(updated));
-  }, [leaderboard, selectedMode]);
+    const newRecord: ScoreRecord = { score: finalScore, date: Date.now(), mode: mode };
+    setLeaderboard(prev => {
+      const updated = [...prev, newRecord]
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 10);
+      localStorage.setItem('emoji_blast_leaderboard', JSON.stringify(updated));
+      return updated;
+    });
+  }, []);
 
   const generateRandomBubble = useCallback((palette: string[]): BubbleInterface => {
     const isSpecial = Math.random() < 0.12; 
@@ -93,13 +94,8 @@ const App: React.FC = () => {
     };
   }, []);
 
-  const shiftGridDown = useCallback(async (prevState: GameState): Promise<GameState> => {
-    // Start animation
-    setIsGridShifting(true);
-    
-    // Wait for animation duration (match CSS transition)
-    await new Promise(resolve => setTimeout(resolve, 500));
-
+  // Internal Logic to actually move the data
+  const performGridShift = useCallback((prevState: GameState): GameState => {
     const newGrid = Array.from({ length: GRID_HEIGHT }, (_, r) => 
       Array.from({ length: GRID_WIDTH }, (_, c) => ({ row: r, col: c, bubble: null as BubbleInterface | null }))
     );
@@ -118,8 +114,6 @@ const App: React.FC = () => {
     for (let c = 0; c < GRID_WIDTH; c++) {
       newGrid[0][c].bubble = generateRandomBubble(prevState.activePalette);
     }
-
-    setIsGridShifting(false);
 
     return {
       ...prevState,
@@ -170,42 +164,54 @@ const App: React.FC = () => {
     getLevelHint(1, selectedMode === GameMode.CLASSIC ? "Clear the board before time runs out!" : "Keep the board clear! A new row arrives every minute.").then(setHint);
   }, [generateRandomBubble, selectedMode]);
 
+  // Main Ticker
   useEffect(() => {
-    if (state?.status === GameStatus.PLAYING) {
-      timerRef.current = window.setInterval(async () => {
-        let needsShift = false;
+    if (state?.status !== GameStatus.PLAYING || isGridShifting) return;
+
+    const intervalId = setInterval(() => {
+      setState(prev => {
+        if (!prev || prev.status !== GameStatus.PLAYING) return prev;
+
+        if (prev.mode === GameMode.CLASSIC) {
+          if (prev.timeLeft <= 1) return { ...prev, timeLeft: 0, status: GameStatus.LOSE };
+          return { ...prev, timeLeft: prev.timeLeft - 1 };
+        } 
         
-        setState(prev => {
-          if (!prev || prev.status !== GameStatus.PLAYING) return prev;
-
-          if (prev.mode === GameMode.CLASSIC) {
-            if (prev.timeLeft <= 1) return { ...prev, timeLeft: 0, status: GameStatus.LOSE };
-            return { ...prev, timeLeft: prev.timeLeft - 1 };
-          } 
-          
-          if (prev.mode === GameMode.PRESSURE) {
-            if (prev.nextRowIn <= 1) {
-              needsShift = true;
-              return prev; // Handled below
-            }
-            return { ...prev, nextRowIn: prev.nextRowIn - 1 };
+        if (prev.mode === GameMode.PRESSURE) {
+          if (prev.nextRowIn <= 1) {
+            setIsGridShifting(true); // Phase 1: Animation
+            return { ...prev, nextRowIn: 0 };
           }
-          return prev;
-        });
-
-        if (needsShift && state) {
-           const newState = await shiftGridDown(state);
-           setState(newState);
+          return { ...prev, nextRowIn: prev.nextRowIn - 1 };
         }
-      }, 1000);
-    } else if (timerRef.current) {
-      clearInterval(timerRef.current);
-      if (state && (state.status === GameStatus.LOSE || state.status === GameStatus.WIN)) {
-        saveScore(state.score);
-      }
+        return prev;
+      });
+    }, 1000);
+
+    return () => clearInterval(intervalId);
+  }, [state?.status, isGridShifting]);
+
+  // Handle Phase 2: Resolve Animation and Update Data
+  useEffect(() => {
+    if (isGridShifting) {
+      const timeoutId = setTimeout(() => {
+        setState(prev => {
+          if (!prev) return prev;
+          const updated = performGridShift(prev);
+          setIsGridShifting(false);
+          return updated;
+        });
+      }, 500); // Must match CSS transition duration
+      return () => clearTimeout(timeoutId);
     }
-    return () => { if (timerRef.current) clearInterval(timerRef.current); };
-  }, [state?.status, state?.mode, shiftGridDown, saveScore]);
+  }, [isGridShifting, performGridShift]);
+
+  // Score Saving Logic
+  useEffect(() => {
+    if (state && (state.status === GameStatus.LOSE || state.status === GameStatus.WIN)) {
+      saveScore(state.score, state.mode);
+    }
+  }, [state?.status]);
 
   useEffect(() => {
     initLevel();
@@ -450,13 +456,11 @@ const App: React.FC = () => {
       onMouseMove={handleMouseMove}
       onClick={fireShot}
     >
-      {/* Background Decor */}
       <div className="absolute inset-0 opacity-20 pointer-events-none">
         <div className="absolute top-10 left-10 w-64 h-64 bg-purple-600 rounded-full blur-[120px]" />
         <div className="absolute bottom-10 right-10 w-64 h-64 bg-blue-600 rounded-full blur-[120px]" />
       </div>
 
-      {/* Left Sidebar: Controls & Hints */}
       <div className="hidden lg:flex flex-col gap-4 w-64 mr-8 z-50">
         <div className="sidebar-ui glass-morphism p-5 rounded-[2rem] border border-white/10 shadow-xl">
           <h4 className="text-white/40 text-[10px] font-bold uppercase tracking-widest mb-4 text-center">Game Mode</h4>
@@ -510,9 +514,7 @@ const App: React.FC = () => {
         </button>
       </div>
 
-      {/* Main Game Area */}
       <div className="flex flex-col items-center">
-        {/* Header HUD */}
         <div className="z-10 w-full flex justify-between items-center px-4 py-4 mb-4">
           <div className="flex flex-col">
             <h1 className="text-4xl font-black text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 via-orange-500 to-red-500 game-font drop-shadow-sm">
@@ -556,7 +558,6 @@ const App: React.FC = () => {
           </div>
         </div>
 
-        {/* Board */}
         <div 
           ref={boardRef}
           className={`relative glass-morphism rounded-[3rem] border border-white/20 shadow-[0_0_100px_rgba(0,0,0,0.5)] overflow-hidden cursor-crosshair ${isShaking ? 'shake' : ''}`}
@@ -633,7 +634,6 @@ const App: React.FC = () => {
         </div>
       </div>
 
-      {/* Right Sidebar: Leaderboard & Stats */}
       <div className="hidden xl:flex flex-col gap-4 w-64 ml-8 z-50">
         <div className="glass-morphism p-6 rounded-[2rem] border border-white/10 flex flex-col items-center">
           <h4 className="text-white/40 text-[10px] font-bold uppercase tracking-widest mb-4">Shots Used</h4>
@@ -643,7 +643,6 @@ const App: React.FC = () => {
           <span className="text-white/20 text-[10px] mt-1 font-bold">MAX: {state.shotLimit}</span>
         </div>
 
-        {/* Personal Leaderboard */}
         <div className="glass-morphism p-6 rounded-[2rem] border border-white/10 flex flex-col overflow-hidden h-64">
           <div className="flex items-center justify-between mb-4">
             <h4 className="text-white/40 text-[10px] font-bold uppercase tracking-widest">Personal Bests</h4>
@@ -682,7 +681,6 @@ const App: React.FC = () => {
         </div>
       </div>
 
-      {/* Modals & Screens */}
       {showRules && (
         <div className="fixed inset-0 z-[500] flex items-center justify-center bg-slate-950/95 backdrop-blur-2xl animate-appear p-6 overflow-y-auto">
           <div className="modal-ui glass-morphism max-w-3xl w-full rounded-[4rem] border border-white/20 p-10 lg:p-14 relative shadow-2xl no-select">

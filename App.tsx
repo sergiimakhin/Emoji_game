@@ -38,9 +38,20 @@ interface ScoreRecord {
   mode: GameMode;
 }
 
+const INITIAL_PRESSURE_INTERVAL = 60;
+const MIN_PRESSURE_INTERVAL = 15;
+const PRESSURE_DECREMENT = 2;
+
 const App: React.FC = () => {
   const [selectedMode, setSelectedMode] = useState<GameMode>(GameMode.CLASSIC);
   const [state, setState] = useState<GameState | null>(null);
+  const stateRef = useRef<GameState | null>(null);
+  
+  // Sync ref with state for use in interval to avoid stale closures
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+
   const [cannonAngle, setCannonAngle] = useState(0);
   const [hint, setHint] = useState<LevelHint | null>(null);
   const [showHint, setShowHint] = useState(false);
@@ -53,9 +64,9 @@ const App: React.FC = () => {
   const [leaderboard, setLeaderboard] = useState<ScoreRecord[]>([]);
   
   const boardRef = useRef<HTMLDivElement>(null);
+  const timerRef = useRef<number | null>(null);
   const requestRef = useRef<number | null>(null);
 
-  // Load Leaderboard
   useEffect(() => {
     const saved = localStorage.getItem('emoji_blast_leaderboard');
     if (saved) {
@@ -63,17 +74,16 @@ const App: React.FC = () => {
     }
   }, []);
 
-  const saveScore = useCallback((finalScore: number, mode: GameMode) => {
+  const saveScore = useCallback((finalScore: number) => {
     if (finalScore <= 0) return;
-    const newRecord: ScoreRecord = { score: finalScore, date: Date.now(), mode: mode };
-    setLeaderboard(prev => {
-      const updated = [...prev, newRecord]
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 10);
-      localStorage.setItem('emoji_blast_leaderboard', JSON.stringify(updated));
-      return updated;
-    });
-  }, []);
+    const currentMode = stateRef.current?.mode || selectedMode;
+    const newRecord: ScoreRecord = { score: finalScore, date: Date.now(), mode: currentMode };
+    const updated = [...leaderboard, newRecord]
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 10);
+    setLeaderboard(updated);
+    localStorage.setItem('emoji_blast_leaderboard', JSON.stringify(updated));
+  }, [leaderboard, selectedMode]);
 
   const generateRandomBubble = useCallback((palette: string[]): BubbleInterface => {
     const isSpecial = Math.random() < 0.12; 
@@ -94,34 +104,50 @@ const App: React.FC = () => {
     };
   }, []);
 
-  // Internal Logic to actually move the data
-  const performGridShift = useCallback((prevState: GameState): GameState => {
-    const newGrid = Array.from({ length: GRID_HEIGHT }, (_, r) => 
-      Array.from({ length: GRID_WIDTH }, (_, c) => ({ row: r, col: c, bubble: null as BubbleInterface | null }))
-    );
+  const shiftGridDown = useCallback(async () => {
+    if (!stateRef.current || isGridShifting) return;
 
-    let overflow = false;
-    for (let r = 0; r < GRID_HEIGHT - 1; r++) {
-      for (let c = 0; c < GRID_WIDTH; c++) {
-        const bubble = prevState.grid[r][c].bubble;
-        if (bubble) {
-          newGrid[r + 1][c].bubble = bubble;
-          if (r + 1 >= FAIL_LINE_ROW) overflow = true;
+    // Start Smooth Transition Animation
+    setIsGridShifting(true);
+    
+    // Duration of the translate-y transition
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    setState(prevState => {
+      if (!prevState) return null;
+
+      const newGrid = Array.from({ length: GRID_HEIGHT }, (_, r) => 
+        Array.from({ length: GRID_WIDTH }, (_, c) => ({ row: r, col: c, bubble: null as BubbleInterface | null }))
+      );
+
+      let overflow = false;
+      for (let r = 0; r < GRID_HEIGHT - 1; r++) {
+        for (let c = 0; c < GRID_WIDTH; c++) {
+          const bubble = prevState.grid[r][c].bubble;
+          if (bubble) {
+            newGrid[r + 1][c].bubble = bubble;
+            if (r + 1 >= FAIL_LINE_ROW) overflow = true;
+          }
         }
       }
-    }
 
-    for (let c = 0; c < GRID_WIDTH; c++) {
-      newGrid[0][c].bubble = generateRandomBubble(prevState.activePalette);
-    }
+      for (let c = 0; c < GRID_WIDTH; c++) {
+        newGrid[0][c].bubble = generateRandomBubble(prevState.activePalette);
+      }
 
-    return {
-      ...prevState,
-      grid: newGrid,
-      status: overflow ? GameStatus.LOSE : prevState.status,
-      nextRowIn: 60
-    };
-  }, [generateRandomBubble]);
+      const nextInterval = Math.max(MIN_PRESSURE_INTERVAL, prevState.pressureInterval - PRESSURE_DECREMENT);
+
+      return {
+        ...prevState,
+        grid: newGrid,
+        status: overflow ? GameStatus.LOSE : prevState.status,
+        pressureInterval: nextInterval,
+        nextRowIn: nextInterval
+      };
+    });
+
+    setIsGridShifting(false);
+  }, [generateRandomBubble, isGridShifting]);
 
   const initLevel = useCallback(() => {
     const palette = EMOJI_PALETTES[Math.floor(Math.random() * EMOJI_PALETTES.length)];
@@ -152,7 +178,8 @@ const App: React.FC = () => {
       shotsUsed: 0,
       score: 0,
       timeLeft: selectedMode === GameMode.CLASSIC ? 180 : 99999,
-      nextRowIn: 60,
+      pressureInterval: INITIAL_PRESSURE_INTERVAL,
+      nextRowIn: INITIAL_PRESSURE_INTERVAL,
       mode: selectedMode,
       activePalette: palette,
       currentShot: generateRandomBubble(palette),
@@ -164,54 +191,37 @@ const App: React.FC = () => {
     getLevelHint(1, selectedMode === GameMode.CLASSIC ? "Clear the board before time runs out!" : "Keep the board clear! A new row arrives every minute.").then(setHint);
   }, [generateRandomBubble, selectedMode]);
 
-  // Main Ticker
   useEffect(() => {
-    if (state?.status !== GameStatus.PLAYING || isGridShifting) return;
+    if (state?.status === GameStatus.PLAYING) {
+      timerRef.current = window.setInterval(async () => {
+        const current = stateRef.current;
+        if (!current || current.status !== GameStatus.PLAYING) return;
 
-    const intervalId = setInterval(() => {
-      setState(prev => {
-        if (!prev || prev.status !== GameStatus.PLAYING) return prev;
-
-        if (prev.mode === GameMode.CLASSIC) {
-          if (prev.timeLeft <= 1) return { ...prev, timeLeft: 0, status: GameStatus.LOSE };
-          return { ...prev, timeLeft: prev.timeLeft - 1 };
+        if (current.mode === GameMode.CLASSIC) {
+          setState(prev => {
+            if (!prev) return null;
+            if (prev.timeLeft <= 1) return { ...prev, timeLeft: 0, status: GameStatus.LOSE };
+            return { ...prev, timeLeft: prev.timeLeft - 1 };
+          });
         } 
         
-        if (prev.mode === GameMode.PRESSURE) {
-          if (prev.nextRowIn <= 1) {
-            setIsGridShifting(true); // Phase 1: Animation
-            return { ...prev, nextRowIn: 0 };
+        if (current.mode === GameMode.PRESSURE) {
+          if (current.nextRowIn <= 1) {
+            // Trigger shift exactly on zero
+            await shiftGridDown();
+          } else {
+            setState(prev => prev ? ({ ...prev, nextRowIn: prev.nextRowIn - 1 }) : null);
           }
-          return { ...prev, nextRowIn: prev.nextRowIn - 1 };
         }
-        return prev;
-      });
-    }, 1000);
-
-    return () => clearInterval(intervalId);
-  }, [state?.status, isGridShifting]);
-
-  // Handle Phase 2: Resolve Animation and Update Data
-  useEffect(() => {
-    if (isGridShifting) {
-      const timeoutId = setTimeout(() => {
-        setState(prev => {
-          if (!prev) return prev;
-          const updated = performGridShift(prev);
-          setIsGridShifting(false);
-          return updated;
-        });
-      }, 500); // Must match CSS transition duration
-      return () => clearTimeout(timeoutId);
+      }, 1000);
+    } else if (timerRef.current) {
+      clearInterval(timerRef.current);
+      if (state && (state.status === GameStatus.LOSE || state.status === GameStatus.WIN)) {
+        saveScore(state.score);
+      }
     }
-  }, [isGridShifting, performGridShift]);
-
-  // Score Saving Logic
-  useEffect(() => {
-    if (state && (state.status === GameStatus.LOSE || state.status === GameStatus.WIN)) {
-      saveScore(state.score, state.mode);
-    }
-  }, [state?.status]);
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+  }, [state?.status, state?.mode, shiftGridDown, saveScore]);
 
   useEffect(() => {
     initLevel();
@@ -446,7 +456,7 @@ const App: React.FC = () => {
     return rank === -1 ? sorted.length + 1 : rank + 1;
   };
 
-  const isHighScore = state && leaderboard.length > 0 && state.score > leaderboard[0].score;
+  const isPB = state && leaderboard.length > 0 && state.score > leaderboard[0].score;
 
   if (!state) return <div className="h-screen w-screen bg-slate-900 flex items-center justify-center text-white">Loading Game...</div>;
 
@@ -524,7 +534,7 @@ const App: React.FC = () => {
               <span className="text-white/40 text-[10px] font-bold uppercase tracking-[0.3em]">
                 {state.mode === GameMode.CLASSIC ? 'Classic Mode' : 'Pressure Mode'}
               </span>
-              {isHighScore && (
+              {isPB && (
                 <span className="bg-yellow-500/20 border border-yellow-500/40 px-2 py-0.5 rounded text-[8px] text-yellow-400 font-black uppercase animate-pulse">Personal Best!</span>
               )}
             </div>
@@ -697,7 +707,7 @@ const App: React.FC = () => {
                   <h3 className="text-2xl font-black text-red-400 uppercase game-font mb-4 flex items-center gap-3">Modes & Failure</h3>
                   <ul className="space-y-3 text-white/80 text-sm leading-relaxed">
                     <li>• <b className="text-amber-400">Classic Mode:</b> Clear the board before the 3-minute timer hits zero!</li>
-                    <li>• <b className="text-red-400">Pressure Mode:</b> No timer, but every minute a new row of bubbles shifts down from the top!</li>
+                    <li>• <b className="text-red-400">Pressure Mode:</b> Every shift, the time between rows <i className="text-red-300">decreases</i>! Speed is key.</li>
                     <li>• <b className="text-red-300">Fail Line:</b> If bubbles cross the red dashed line at the bottom, it's Game Over!</li>
                     <li>• <b className="text-red-300">Shot Limit:</b> You have {state.shotLimit} shots. Don't run out!</li>
                   </ul>
@@ -737,7 +747,7 @@ const App: React.FC = () => {
       {state.status !== GameStatus.PLAYING && (
         <div className="fixed inset-0 z-[600] flex items-center justify-center bg-slate-950/80 backdrop-blur-xl animate-appear">
           <div className="glass-morphism p-12 rounded-[4rem] shadow-2xl flex flex-col items-center max-w-sm w-full border border-white/20 relative">
-            {isHighScore && (
+            {isPB && (
               <div className="absolute -top-10 left-1/2 -translate-x-1/2 bg-yellow-500 text-slate-950 font-black px-8 py-3 rounded-full shadow-2xl animate-bounce game-font uppercase tracking-tighter border-4 border-white/40">
                 New Record!
               </div>

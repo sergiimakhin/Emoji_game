@@ -48,7 +48,8 @@ export interface GameState {
   shotsUsed: number;
   score: number;
   timeLeft: number;
-  nextRowIn: number; // For Pressure mode
+  nextRowIn: number;
+  pressureInterval: number; // The current duration for the next row arrival
   mode: GameMode;
   activePalette: string[];
   status: GameStatus;

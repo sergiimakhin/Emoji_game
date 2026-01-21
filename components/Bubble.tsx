@@ -1,19 +1,26 @@
 
 import React from 'react';
-import { Bubble as BubbleType, BubbleType as BT } from '../types';
+import { Bubble as BubbleInterface, BubbleType as BT } from '../types';
 import { BUBBLE_RADIUS, SPECIAL_EMOJIS } from '../constants';
 
 interface BubbleProps {
-  bubble: BubbleType;
+  bubble: BubbleInterface;
   style?: React.CSSProperties;
   className?: string;
   isNew?: boolean;
 }
 
 const Bubble: React.FC<BubbleProps> = ({ bubble, style, className, isNew }) => {
+  // Guard against null/undefined bubble object
+  if (!bubble) return null;
+
   const getDisplayEmoji = () => {
-    switch (bubble.type) {
-      case BT.STANDARD: return bubble.emojiKey;
+    // Defensive check for type
+    const type = bubble.type;
+    if (!type) return "?";
+
+    switch (type) {
+      case BT.STANDARD: return bubble.emojiKey || "?";
       case BT.BOMB: return SPECIAL_EMOJIS.BOMB;
       case BT.LINECLEAR: return SPECIAL_EMOJIS.LINECLEAR;
       case BT.COLORCLEAR: return SPECIAL_EMOJIS.COLORCLEAR;
@@ -27,16 +34,17 @@ const Bubble: React.FC<BubbleProps> = ({ bubble, style, className, isNew }) => {
   };
 
   const getBgColor = () => {
-    if (bubble.type === BT.STONE) return 'bg-slate-500';
-    if (bubble.type === BT.ICE) return 'bg-blue-100/60 backdrop-blur-sm border-2 border-blue-300';
-    if (bubble.type === BT.WILD) return 'bg-gradient-to-tr from-purple-400 via-pink-400 to-yellow-400';
+    const type = bubble.type;
+    if (type === BT.STONE) return 'bg-slate-500';
+    if (type === BT.ICE) return 'bg-blue-100/60 backdrop-blur-sm border-2 border-blue-300';
+    if (type === BT.WILD) return 'bg-gradient-to-tr from-purple-400 via-pink-400 to-yellow-400';
     return 'bg-white/10 backdrop-blur-sm border border-white/20';
   };
 
   return (
     <div
       className={`absolute flex items-center justify-center rounded-full shadow-lg transition-all duration-300 
-        ${getBgColor()} ${isNew ? 'animate-appear' : ''} ${className} pointer-events-none`}
+        ${getBgColor()} ${isNew ? 'animate-appear' : ''} ${className || ''} pointer-events-none`}
       style={{
         width: BUBBLE_RADIUS * 2,
         height: BUBBLE_RADIUS * 2,
@@ -52,7 +60,7 @@ const Bubble: React.FC<BubbleProps> = ({ bubble, style, className, isNew }) => {
           {bubble.innerBubble.emojiKey}
         </div>
       )}
-      {bubble.hp > 1 && (
+      {(bubble.hp || 0) > 1 && (
         <div className="absolute top-0 right-0 bg-red-500 text-white text-[10px] w-5 h-5 rounded-full flex items-center justify-center font-bold border-2 border-white/20 shadow-sm">
           {bubble.hp}
         </div>

@@ -42,12 +42,23 @@ const INITIAL_PRESSURE_INTERVAL = 60;
 const MIN_PRESSURE_INTERVAL = 15;
 const PRESSURE_DECREMENT = 2;
 
+// Standardized game dimensions
+// Perfectly fits the hex grid widest row
+const GAME_CONTENT_WIDTH = (GRID_WIDTH + 0.5) * HEX_WIDTH;
+// Calculate top-row y-offset and fail line correctly
+const FAIL_LINE_Y = (FAIL_LINE_ROW * HEX_HEIGHT * 0.75) + BUBBLE_RADIUS;
+// Position the pivot just below the fail line
+const CANNON_PIVOT_Y = FAIL_LINE_Y + 48;
+const CANNON_PIVOT_X = GAME_CONTENT_WIDTH / 2;
+// Ensure board container is tall enough to show cannon and preview
+const GAME_CONTENT_HEIGHT = CANNON_PIVOT_Y + 120;
+const CANNON_BARREL_LENGTH = 100;
+
 const App: React.FC = () => {
   const [selectedMode, setSelectedMode] = useState<GameMode>(GameMode.CLASSIC);
   const [state, setState] = useState<GameState | null>(null);
   const stateRef = useRef<GameState | null>(null);
   
-  // Sync ref with state for use in interval to avoid stale closures
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
@@ -91,7 +102,7 @@ const App: React.FC = () => {
       const types = [BubbleType.BOMB, BubbleType.LINECLEAR, BubbleType.WILD];
       return {
         id: Math.random().toString(36).substr(2, 9),
-        type: types[Math.floor(Math.random() * types.length)],
+        type: types[Math.floor(Math.random() * types.length)] || BubbleType.STANDARD,
         emojiKey: null,
         hp: 1
       };
@@ -99,7 +110,7 @@ const App: React.FC = () => {
     return {
       id: Math.random().toString(36).substr(2, 9),
       type: BubbleType.STANDARD,
-      emojiKey: palette[Math.floor(Math.random() * palette.length)],
+      emojiKey: palette[Math.floor(Math.random() * palette.length)] || null,
       hp: 1
     };
   }, []);
@@ -107,10 +118,7 @@ const App: React.FC = () => {
   const shiftGridDown = useCallback(async () => {
     if (!stateRef.current || isGridShifting) return;
 
-    // Start Smooth Transition Animation
     setIsGridShifting(true);
-    
-    // Duration of the translate-y transition
     await new Promise(resolve => setTimeout(resolve, 500));
 
     setState(prevState => {
@@ -123,7 +131,7 @@ const App: React.FC = () => {
       let overflow = false;
       for (let r = 0; r < GRID_HEIGHT - 1; r++) {
         for (let c = 0; c < GRID_WIDTH; c++) {
-          const bubble = prevState.grid[r][c].bubble;
+          const bubble = prevState.grid[r] && prevState.grid[r][c] ? prevState.grid[r][c].bubble : null;
           if (bubble) {
             newGrid[r + 1][c].bubble = bubble;
             if (r + 1 >= FAIL_LINE_ROW) overflow = true;
@@ -159,14 +167,14 @@ const App: React.FC = () => {
            const types = [BubbleType.BOMB, BubbleType.LINECLEAR, BubbleType.STONE];
            bubble = {
               id: Math.random().toString(36).substr(2, 9),
-              type: types[Math.floor(Math.random() * types.length)],
+              type: types[Math.floor(Math.random() * types.length)] || BubbleType.STANDARD,
               emojiKey: null,
               hp: 1
            };
         } else if (r < 5) {
            bubble = generateRandomBubble(palette);
-           if (bubble.type !== BubbleType.STANDARD) bubble.type = BubbleType.STANDARD;
-           bubble.emojiKey = palette[Math.floor(Math.random() * palette.length)];
+           if (bubble && bubble.type !== BubbleType.STANDARD) bubble.type = BubbleType.STANDARD;
+           if (bubble) bubble.emojiKey = palette[Math.floor(Math.random() * palette.length)] || null;
         }
         return { row: r, col: c, bubble };
       })
@@ -174,7 +182,7 @@ const App: React.FC = () => {
 
     setState({
       grid: newGrid,
-      shotLimit: 40,
+      shotLimit: selectedMode === GameMode.PRESSURE ? 999999 : 40,
       shotsUsed: 0,
       score: 0,
       timeLeft: selectedMode === GameMode.CLASSIC ? 180 : 99999,
@@ -207,7 +215,6 @@ const App: React.FC = () => {
         
         if (current.mode === GameMode.PRESSURE) {
           if (current.nextRowIn <= 1) {
-            // Trigger shift exactly on zero
             await shiftGridDown();
           } else {
             setState(prev => prev ? ({ ...prev, nextRowIn: prev.nextRowIn - 1 }) : null);
@@ -230,12 +237,16 @@ const App: React.FC = () => {
   const handleMouseMove = (e: React.MouseEvent) => {
     if (!boardRef.current || state?.status !== GameStatus.PLAYING || showRules) return;
     const rect = boardRef.current.getBoundingClientRect();
-    const centerX = rect.width / 2;
-    const centerY = rect.height - 40;
+    
+    // Mouse coords relative to board container
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;
-    const angle = Math.atan2(mouseX - centerX, centerY - mouseY) * (180 / Math.PI);
-    setCannonAngle(Math.max(-80, Math.min(80, angle)));
+    
+    const dx = mouseX - CANNON_PIVOT_X;
+    const dy = CANNON_PIVOT_Y - mouseY;
+    const angle = Math.atan2(dx, dy) * (180 / Math.PI);
+    
+    setCannonAngle(Math.max(-85, Math.min(85, angle)));
   };
 
   const fireShot = (e: React.MouseEvent) => {
@@ -245,10 +256,13 @@ const App: React.FC = () => {
     const radians = (cannonAngle - 90) * (Math.PI / 180);
     const speed = 12.15; 
     const velocity = { x: Math.cos(radians) * speed, y: Math.sin(radians) * speed };
-    const rect = boardRef.current!.getBoundingClientRect();
     
+    // Start shot from the muzzle tip instead of pivot for better visual flow
+    const startX = CANNON_PIVOT_X + Math.cos(radians) * CANNON_BARREL_LENGTH;
+    const startY = CANNON_PIVOT_Y + Math.sin(radians) * CANNON_BARREL_LENGTH;
+
     setFlyingBubble({
-      pos: { x: rect.width / 2, y: rect.height - 120 },
+      pos: { x: startX, y: startY },
       velocity,
       bubble: state.currentShot
     });
@@ -266,7 +280,7 @@ const App: React.FC = () => {
 
   const resolveTurn = useCallback(async (hitRow: number, hitCol: number, shotBubble: BubbleInterface) => {
     setState(prev => {
-      if (!prev) return null;
+      if (!prev || !shotBubble) return prev;
       let newGrid = [...prev.grid.map(row => [...row])];
       if (hitRow < 0 || hitRow >= GRID_HEIGHT || hitCol < 0 || hitCol >= GRID_WIDTH) return prev;
       
@@ -278,6 +292,8 @@ const App: React.FC = () => {
       let specialTriggered = false;
 
       const processEffect = (row: number, col: number, bubble: BubbleInterface) => {
+        if (!bubble || !bubble.type) return;
+
         if (bubble.type === BubbleType.BOMB) {
           specialTriggered = true;
           const affected = resolveExplosion(newGrid, row, col, 1);
@@ -303,7 +319,7 @@ const App: React.FC = () => {
 
       const neighbors = getNeighbors(hitRow, hitCol, GRID_WIDTH, GRID_HEIGHT);
       for (const n of neighbors) {
-        const neighborBubble = newGrid[n.row][n.col].bubble;
+        const neighborBubble = newGrid[n.row] && newGrid[n.row][n.col] ? newGrid[n.row][n.col].bubble : null;
         if (neighborBubble && (neighborBubble.type === BubbleType.BOMB || neighborBubble.type === BubbleType.LINECLEAR)) {
           processEffect(n.row, n.col, neighborBubble);
         }
@@ -325,7 +341,7 @@ const App: React.FC = () => {
       const anchored = getAnchoredBubbles(newGrid);
       for (let r = 0; r < GRID_HEIGHT; r++) {
         for (let c = 0; c < GRID_WIDTH; c++) {
-          if (newGrid[r][c].bubble && !anchored.has(`${r},${c}`)) {
+          if (newGrid[r] && newGrid[r][c] && newGrid[r][c].bubble && !anchored.has(`${r},${c}`)) {
             newGrid[r][c].bubble = null;
             totalScore += 30;
           }
@@ -336,15 +352,18 @@ const App: React.FC = () => {
       let reachedFailLine = false;
       for (let r = 0; r < GRID_HEIGHT; r++) {
         for (let c = 0; c < GRID_WIDTH; c++) {
-          if (newGrid[r][c].bubble) {
+          if (newGrid[r] && newGrid[r][c] && newGrid[r][c].bubble) {
             hasBubbles = true;
             if (r >= FAIL_LINE_ROW) reachedFailLine = true;
           }
         }
       }
 
+      // Shot limit only applies to Classic mode
+      const isOutOfShots = prev.mode === GameMode.CLASSIC && prev.shotsUsed >= prev.shotLimit;
+
       const nextStatus = !hasBubbles ? GameStatus.WIN : 
-                         (reachedFailLine || prev.shotsUsed >= prev.shotLimit) ? GameStatus.LOSE : 
+                         (reachedFailLine || isOutOfShots) ? GameStatus.LOSE : 
                          GameStatus.PLAYING;
 
       return {
@@ -360,7 +379,7 @@ const App: React.FC = () => {
 
   const animate = useCallback(() => {
     setFlyingBubble(prev => {
-      if (!prev || !state) return null;
+      if (!prev || !state || !prev.bubble) return null;
       let { x, y } = prev.pos;
       let { x: vx, y: vy } = prev.velocity;
 
@@ -369,14 +388,12 @@ const App: React.FC = () => {
         x += vx / steps;
         y += vy / steps;
 
-        const rect = boardRef.current!.getBoundingClientRect();
-        const padding = 12;
-
-        if (x < BUBBLE_RADIUS + padding) {
-          x = BUBBLE_RADIUS + padding;
+        // Perfectly aligned wall collision - coincides with the visual container edges
+        if (x < BUBBLE_RADIUS) {
+          x = BUBBLE_RADIUS;
           vx *= -1;
-        } else if (x > rect.width - (BUBBLE_RADIUS + padding)) {
-          x = rect.width - (BUBBLE_RADIUS + padding);
+        } else if (x > GAME_CONTENT_WIDTH - BUBBLE_RADIUS) {
+          x = GAME_CONTENT_WIDTH - BUBBLE_RADIUS;
           vx *= -1;
         }
 
@@ -385,7 +402,8 @@ const App: React.FC = () => {
         let targetRow = row;
         let targetCol = col;
 
-        if (y <= BUBBLE_RADIUS + padding) {
+        // Ceiling collision - perfectly aligned with top border
+        if (y <= BUBBLE_RADIUS) {
           collided = true;
           targetRow = 0;
           targetCol = Math.max(0, Math.min(GRID_WIDTH - 1, col));
@@ -395,14 +413,14 @@ const App: React.FC = () => {
           if (row >= 0 && row < GRID_HEIGHT && col >= 0 && col < GRID_WIDTH) candidates.push({ row, col });
 
           for (const n of candidates) {
-            const neighborCell = state.grid[n.row]?.[n.col];
-            if (neighborCell?.bubble) {
+            const neighborCell = state.grid[n.row] ? state.grid[n.row][n.col] : null;
+            if (neighborCell && neighborCell.bubble) {
               const p = getPixelCoords(n.row, n.col);
               const distSq = (x - p.x) ** 2 + (y - p.y) ** 2;
               if (distSq < (BUBBLE_RADIUS * 1.7) ** 2) {
                 collided = true;
                 const empties = getNeighbors(n.row, n.col, GRID_WIDTH, GRID_HEIGHT)
-                  .filter(e => !state.grid[e.row][e.col].bubble);
+                  .filter(e => state.grid[e.row] && !state.grid[e.row][e.col].bubble);
                 
                 if (empties.length > 0) {
                   const nearest = empties.reduce((a, b) => {
@@ -572,85 +590,83 @@ const App: React.FC = () => {
           ref={boardRef}
           className={`relative glass-morphism rounded-[3rem] border border-white/20 shadow-[0_0_100px_rgba(0,0,0,0.5)] overflow-hidden cursor-crosshair ${isShaking ? 'shake' : ''}`}
           style={{ 
-            width: GRID_WIDTH * HEX_WIDTH + 30, 
-            height: GRID_HEIGHT * (HEX_HEIGHT * 0.75) + 60,
-            padding: '15px'
+            width: GAME_CONTENT_WIDTH, 
+            height: GAME_CONTENT_HEIGHT,
+            boxSizing: 'content-box'
           }}
         >
-          {blasts.map(b => (
-            <div 
-              key={b.id} 
-              className="blast-effect" 
-              style={{ 
-                left: b.x - BUBBLE_RADIUS, 
-                top: b.y - BUBBLE_RADIUS, 
-                width: BUBBLE_RADIUS * 2, 
-                height: BUBBLE_RADIUS * 2,
-                borderColor: b.color 
-              }} 
-            />
-          ))}
-
-          <div className="absolute inset-0 opacity-[0.02] pointer-events-none" style={{ backgroundSize: '40px 40px', backgroundImage: 'radial-gradient(circle, white 1px, transparent 1px)' }} />
-
-          <div className="absolute left-0 w-full border-t-2 border-dashed border-red-500/30 z-0" style={{ top: FAIL_LINE_ROW * HEX_HEIGHT * 0.75 + 15 }}>
-            <div className="absolute -top-4 left-1/2 -translate-x-1/2 bg-red-500/10 px-4 py-0.5 rounded-full border border-red-500/20">
-              <span className="text-red-500/50 text-[10px] font-black uppercase tracking-widest">Fail Line</span>
-            </div>
-          </div>
-
-          <div className={`relative w-full h-full transition-transform duration-500 ease-in-out ${isGridShifting ? 'translate-y-[52px]' : ''}`}>
-            {state.grid.map((row, r) => row.map((cell, c) => {
-              if (!cell.bubble) return null;
-              const coords = getPixelCoords(r, c);
-              const isLatest = lastPlacedCell?.row === r && lastPlacedCell?.col === c;
-              return (
-                <Bubble 
-                  key={cell.bubble.id} 
-                  bubble={cell.bubble} 
-                  isNew={isLatest}
-                  style={{ left: coords.x - BUBBLE_RADIUS, top: coords.y - BUBBLE_RADIUS }}
-                />
-              );
-            }))}
-
-            {flyingBubble && (
-              <Bubble 
-                bubble={flyingBubble.bubble}
-                isNew={false}
-                style={{
-                  left: flyingBubble.pos.x - BUBBLE_RADIUS,
-                  top: flyingBubble.pos.y - BUBBLE_RADIUS,
-                  zIndex: 100,
-                  transition: 'none'
-                }}
+          {/* Internal Content Container - all calculations relative to 0,0 here */}
+          <div className={`relative w-full h-full`}>
+            {blasts.map(b => (
+              <div 
+                key={b.id} 
+                className="blast-effect" 
+                style={{ 
+                  left: b.x - BUBBLE_RADIUS, 
+                  top: b.y - BUBBLE_RADIUS, 
+                  width: BUBBLE_RADIUS * 2, 
+                  height: BUBBLE_RADIUS * 2,
+                  borderColor: b.color 
+                }} 
               />
-            )}
-          </div>
+            ))}
 
-          {!flyingBubble && state.status === GameStatus.PLAYING && (
-            <div 
-              className="absolute bottom-24 left-1/2 w-0.5 bg-gradient-to-t from-white/40 to-transparent origin-bottom pointer-events-none z-10"
-              style={{ height: 500, transform: `translateX(-50%) rotate(${cannonAngle}deg)` }}
+            <div className="absolute inset-0 opacity-[0.02] pointer-events-none" style={{ backgroundSize: '40px 40px', backgroundImage: 'radial-gradient(circle, white 1px, transparent 1px)' }} />
+
+            <div className="absolute left-0 w-full border-t-2 border-dashed border-red-500/30 z-0" style={{ top: FAIL_LINE_Y }}>
+              <div className="absolute -top-4 left-1/2 -translate-x-1/2 bg-red-500/10 px-4 py-0.5 rounded-full border border-red-500/20">
+                <span className="text-red-500/50 text-[10px] font-black uppercase tracking-widest">Fail Line</span>
+              </div>
+            </div>
+
+            <div className={`relative w-full h-full transition-transform duration-500 ease-in-out ${isGridShifting ? 'translate-y-[52px]' : ''}`}>
+              {state.grid.map((row, r) => row.map((cell, c) => {
+                if (!cell || !cell.bubble) return null;
+                const coords = getPixelCoords(r, c);
+                const isLatest = lastPlacedCell?.row === r && lastPlacedCell?.col === c;
+                return (
+                  <Bubble 
+                    key={cell.bubble.id || `${r}-${c}`} 
+                    bubble={cell.bubble} 
+                    isNew={isLatest}
+                    style={{ left: coords.x - BUBBLE_RADIUS, top: coords.y - BUBBLE_RADIUS }}
+                  />
+                );
+              }))}
+
+              {flyingBubble && flyingBubble.bubble && (
+                <Bubble 
+                  bubble={flyingBubble.bubble}
+                  isNew={false}
+                  style={{
+                    left: flyingBubble.pos.x - BUBBLE_RADIUS,
+                    top: flyingBubble.pos.y - BUBBLE_RADIUS,
+                    zIndex: 100,
+                    transition: 'none'
+                  }}
+                />
+              )}
+            </div>
+
+            <Cannon 
+              angle={cannonAngle} 
+              currentBubble={state.currentShot} 
+              nextBubble={state.nextShot} 
+              position={{ x: CANNON_PIVOT_X, y: CANNON_PIVOT_Y }}
             />
-          )}
-
-          <Cannon 
-            angle={cannonAngle} 
-            currentBubble={state.currentShot} 
-            nextBubble={state.nextShot} 
-            position={{ x: (GRID_WIDTH * HEX_WIDTH) / 2, y: GRID_HEIGHT * HEX_HEIGHT * 0.75 }}
-          />
+          </div>
         </div>
       </div>
 
       <div className="hidden xl:flex flex-col gap-4 w-64 ml-8 z-50">
         <div className="glass-morphism p-6 rounded-[2rem] border border-white/10 flex flex-col items-center">
           <h4 className="text-white/40 text-[10px] font-bold uppercase tracking-widest mb-4">Shots Used</h4>
-          <span className={`text-4xl font-black game-font ${state.shotLimit - state.shotsUsed < 5 ? 'text-red-500 animate-pulse' : 'text-white'}`}>
+          <span className={`text-4xl font-black game-font ${state.mode === GameMode.CLASSIC && state.shotLimit - state.shotsUsed < 5 ? 'text-red-500 animate-pulse' : 'text-white'}`}>
             {state.shotsUsed}
           </span>
-          <span className="text-white/20 text-[10px] mt-1 font-bold">MAX: {state.shotLimit}</span>
+          {state.mode === GameMode.CLASSIC && (
+            <span className="text-white/20 text-[10px] mt-1 font-bold">MAX: {state.shotLimit}</span>
+          )}
         </div>
 
         <div className="glass-morphism p-6 rounded-[2rem] border border-white/10 flex flex-col overflow-hidden h-64">
@@ -706,10 +722,10 @@ const App: React.FC = () => {
                 <div>
                   <h3 className="text-2xl font-black text-red-400 uppercase game-font mb-4 flex items-center gap-3">Modes & Failure</h3>
                   <ul className="space-y-3 text-white/80 text-sm leading-relaxed">
-                    <li>• <b className="text-amber-400">Classic Mode:</b> Clear the board before the 3-minute timer hits zero!</li>
-                    <li>• <b className="text-red-400">Pressure Mode:</b> Every shift, the time between rows <i className="text-red-300">decreases</i>! Speed is key.</li>
+                    <li>• <b className="text-amber-400">Classic Mode:</b> Clear the board before the 3-minute timer hits zero or shots run out!</li>
+                    <li>• <b className="text-red-400">Pressure Mode:</b> Every shift, the time between rows <i className="text-red-300">decreases</i>! Speed is key. Infinite shots!</li>
                     <li>• <b className="text-red-300">Fail Line:</b> If bubbles cross the red dashed line at the bottom, it's Game Over!</li>
-                    <li>• <b className="text-red-300">Shot Limit:</b> You have {state.shotLimit} shots. Don't run out!</li>
+                    <li>• <b className="text-red-300">Shot Limit:</b> Classic mode gives you 40 shots. Aim carefully!</li>
                   </ul>
                 </div>
                 <div>
@@ -761,7 +777,7 @@ const App: React.FC = () => {
             <div className="text-white/60 text-sm mb-8 text-center px-4">
               {state.status === GameStatus.WIN ? 'Masterfully cleared!' : (
                 state.timeLeft === 0 && state.mode === GameMode.CLASSIC ? 'Time\'s up! Better luck next time.' :
-                state.shotsUsed >= state.shotLimit ? 'Out of moves! Aim better.' :
+                state.shotsUsed >= state.shotLimit && state.mode === GameMode.CLASSIC ? 'Out of moves! Aim better.' :
                 'The board overflowed! Pressure was too much.'
               )}
             </div>
